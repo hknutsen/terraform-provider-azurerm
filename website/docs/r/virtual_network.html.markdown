@@ -117,6 +117,8 @@ The `subnet` block supports:
 
 * `security_group` - (Optional) The Network Security Group to associate with the subnet. (Referenced by `id`, ie. `azurerm_network_security_group.example.id`)
 
+* `nat_gateway` - (Optional) The NAT Gateway to associate with the subnet. (Referenced by `id`, ie. `azurerm_nat_gatewat.example.id`)
+
 * `default_outbound_access_enabled` - (Optional) Enable default outbound access to the internet for the subnet. Defaults to `true`.
 
 * `delegation` - (Optional) One or more `delegation` blocks as defined below.
