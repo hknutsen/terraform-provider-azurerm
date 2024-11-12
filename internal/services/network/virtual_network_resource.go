@@ -22,6 +22,7 @@ import (
 	"github.com/hashicorp/go-azure-sdk/resource-manager/network/2023-11-01/routetables"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/network/2023-11-01/serviceendpointpolicies"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/network/2023-11-01/subnets"
+	"github.com/hashicorp/go-azure-sdk/resource-manager/network/2024-03-01/natgateways"
 	"github.com/hashicorp/go-azure-sdk/resource-manager/network/2024-03-01/virtualnetworks"
 	"github.com/hashicorp/terraform-provider-azurerm/helpers/tf"
 	"github.com/hashicorp/terraform-provider-azurerm/internal/clients"
@@ -245,6 +246,11 @@ func resourceVirtualNetworkSchema() map[string]*pluginsdk.Schema {
 						Optional: true,
 					},
 
+					"nat_gateway": {
+						Type:     pluginsdk.TypeString,
+						Optional: true,
+					},
+
 					"service_endpoints": {
 						Type:     pluginsdk.TypeSet,
 						Optional: true,
@@ -330,6 +336,24 @@ func resourceVirtualNetworkCreate(d *pluginsdk.ResourceData, meta interface{}) e
 
 	locks.MultipleByName(&networkSecurityGroupNames, networkSecurityGroupResourceName)
 	defer locks.UnlockMultipleByName(&networkSecurityGroupNames, networkSecurityGroupResourceName)
+
+	natGatewayNames := make([]string, 0)
+	for _, subnet := range *vnet.Properties.Subnets {
+		if subnet.Properties != nil && subnet.Properties.NatGateway != nil {
+			parsedNatGatewayID, err := natgateways.ParseNatGatewayID(*subnet.Properties.NatGateway.Id)
+			if err != nil {
+				return err
+			}
+
+			natGatewayName := parsedNatGatewayID.NatGatewayName
+			if !utils.SliceContainsValue(natGatewayNames, natGatewayName) {
+				natGatewayNames = append(natGatewayNames, natGatewayName)
+			}
+		}
+	}
+
+	locks.MultipleByName(&natGatewayNames, natGatewayResourceName)
+	defer locks.UnlockMultipleByName(&natGatewayNames, natGatewayResourceName)
 
 	if err := client.CreateOrUpdateThenPoll(ctx, id, vnet); err != nil {
 		return fmt.Errorf("creating %s: %+v", id, err)
@@ -523,6 +547,26 @@ func resourceVirtualNetworkUpdate(d *pluginsdk.ResourceData, meta interface{}) e
 	locks.MultipleByName(&networkSecurityGroupNames, networkSecurityGroupResourceName)
 	defer locks.UnlockMultipleByName(&networkSecurityGroupNames, networkSecurityGroupResourceName)
 
+	natGatewayNames := make([]string, 0)
+	if payload.Properties != nil && payload.Properties.Subnets != nil {
+		for _, subnet := range *payload.Properties.Subnets {
+			if subnet.Properties != nil && subnet.Properties.NatGateway != nil && subnet.Properties.NatGateway.Id != nil {
+				parsedNatGatewayID, err := natgateways.ParseNatGatewayID(*subnet.Properties.NatGateway.Id)
+				if err != nil {
+					return err
+				}
+
+				natGatewayName := parsedNatGatewayID.NatGatewayName
+				if !utils.SliceContainsValue(natGatewayNames, natGatewayName) {
+					natGatewayNames = append(natGatewayNames, natGatewayName)
+				}
+			}
+		}
+	}
+
+	locks.MultipleByName(&natGatewayNames, natGatewayResourceName)
+	defer locks.UnlockMultipleByName(&natGatewayNames, natGatewayResourceName)
+
 	if err := client.CreateOrUpdateThenPoll(ctx, *id, *payload); err != nil {
 		return fmt.Errorf("updating %s: %+v", id, err)
 	}
@@ -553,7 +597,7 @@ func resourceVirtualNetworkDelete(d *pluginsdk.ResourceData, meta interface{}) e
 		return err
 	}
 
-	nsgNames, routeTableNames, err := expandResourcesForLocking(d)
+	nsgNames, routeTableNames, natGatewayNames, err := expandResourcesForLocking(d)
 	if err != nil {
 		return fmt.Errorf("parsing Network Security Group ID's: %+v", err)
 	}
@@ -563,6 +607,9 @@ func resourceVirtualNetworkDelete(d *pluginsdk.ResourceData, meta interface{}) e
 
 	locks.MultipleByName(&routeTableNames, routeTableResourceName)
 	defer locks.UnlockMultipleByName(&routeTableNames, routeTableResourceName)
+
+	locks.MultipleByName(&natGatewayNames, natGatewayResourceName)
+	defer locks.UnlockMultipleByName(&natGatewayNames, natGatewayResourceName)
 
 	if err := client.DeleteThenPoll(ctx, *id); err != nil {
 		return fmt.Errorf("deleting %s: %+v", *id, err)
@@ -685,6 +732,14 @@ func expandVirtualNetworkSubnets(ctx context.Context, client virtualnetworks.Vir
 			subnetObj.Properties.NetworkSecurityGroup = nil
 		}
 
+		if natGateway := subnet["nat_gateway"].(string); natGateway != "" {
+			subnetObj.Properties.NatGateway = &virtualnetworks.SubResource{
+				Id: &natGateway,
+			}
+		} else {
+			subnetObj.Properties.NatGateway = nil
+		}
+
 		subnets = append(subnets, *subnetObj)
 	}
 
@@ -757,6 +812,14 @@ func expandVirtualNetworkProperties(ctx context.Context, client virtualnetworks.
 				}
 			} else {
 				subnetObj.Properties.NetworkSecurityGroup = nil
+			}
+
+			if natGateway := subnet["nat_gateway"].(string); natGateway != "" {
+				subnetObj.Properties.NatGateway = &virtualnetworks.SubResource{
+					Id: &natGateway,
+				}
+			} else {
+				subnetObj.Properties.NatGateway = nil
 			}
 
 			subnets = append(subnets, *subnetObj)
@@ -864,6 +927,12 @@ func flattenVirtualNetworkSubnets(input *[]virtualnetworks.Subnet) (*pluginsdk.S
 					}
 				}
 
+				if natGateway := props.NatGateway; natGateway != nil {
+					if natGateway.Id != nil {
+						output["nat_gateway"] = *natGateway.Id
+					}
+				}
+
 				if props.AddressPrefixes == nil {
 					if props.AddressPrefix != nil && len(*props.AddressPrefix) > 0 {
 						output["address_prefixes"] = []string{*props.AddressPrefix}
@@ -950,23 +1019,24 @@ func getExistingSubnet(ctx context.Context, client virtualnetworks.VirtualNetwor
 	return pointer.To(virtualnetworks.Subnet{}), nil
 }
 
-func expandResourcesForLocking(d *pluginsdk.ResourceData) ([]string, []string, error) {
+func expandResourcesForLocking(d *pluginsdk.ResourceData) ([]string, []string, []string, error) {
 	nsgNames := make([]string, 0)
 	routeTableNames := make([]string, 0)
+	natGatewayNames := make([]string, 0)
 
 	if v, ok := d.GetOk("subnet"); ok {
 		subnets := v.(*pluginsdk.Set).List()
 		for _, subnet := range subnets {
 			subnet, ok := subnet.(map[string]interface{})
 			if !ok {
-				return nil, nil, fmt.Errorf("[ERROR] Subnet should be a Hash - was '%+v'", subnet)
+				return nil, nil, nil, fmt.Errorf("[ERROR] Subnet should be a Hash - was '%+v'", subnet)
 			}
 
 			networkSecurityGroupId := subnet["security_group"].(string)
 			if networkSecurityGroupId != "" {
 				parsedNsgID, err := networksecuritygroups.ParseNetworkSecurityGroupID(networkSecurityGroupId)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 
 				networkSecurityGroupName := parsedNsgID.NetworkSecurityGroupName
@@ -979,17 +1049,30 @@ func expandResourcesForLocking(d *pluginsdk.ResourceData) ([]string, []string, e
 			if routeTableId != "" {
 				parsedRouteTableID, err := routetables.ParseRouteTableID(routeTableId)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				routeTableName := parsedRouteTableID.RouteTableName
 				if !utils.SliceContainsValue(routeTableNames, routeTableName) {
 					routeTableNames = append(routeTableNames, routeTableName)
 				}
 			}
+
+			natGatewayId := subnet["nat_gateway"].(string)
+			if natGatewayId != "" {
+				parsedNatGatewayID, err := natgateways.ParseNatGatewayID(natGatewayId)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+
+				natGatewayName := parsedNatGatewayID.NatGatewayName
+				if !utils.SliceContainsValue(natGatewayNames, natGatewayName) {
+					nsgNames = append(natGatewayNames, natGatewayName)
+				}
+			}
 		}
 	}
 
-	return nsgNames, routeTableNames, nil
+	return nsgNames, routeTableNames, natGatewayNames, nil
 }
 
 func expandVirtualNetworkSubnetServiceEndpointPolicies(input []interface{}) *[]virtualnetworks.ServiceEndpointPolicy {
